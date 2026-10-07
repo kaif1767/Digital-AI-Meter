@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime
 import csv, statistics
 import os
+from functools import lru_cache
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -15,6 +16,22 @@ try:
 except Exception: SK=False
 BASE=Path(__file__).resolve().parent.parent; DATA=BASE/'data'/'meter_data.csv'; STATIC=BASE/'app'/'static'
 app=FastAPI(title='Digital AI Meter',version='1.0.0')
+
+@lru_cache(maxsize=4)
+def load_local(resource, modified_ns, file_size):
+    with DATA.open(newline="", encoding="utf-8") as file:
+        rows = csv.DictReader(file)
+        return [
+            {
+                "timestamp": (dt := datetime.fromisoformat(row["timestamp"])).isoformat(),
+                "meter_id": row["meter_id"],
+                "resource": row["resource"],
+                "consumption": float(row["consumption"]),
+                "dt": dt,
+            }
+            for row in rows
+            if resource is None or row["resource"] == resource
+        ]
 
 def snowflake_connection():
     import snowflake.connector
@@ -48,19 +65,8 @@ app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=True,all
 
 def load(resource=None):
     if not os.getenv("SNOWFLAKE_ACCOUNT"):
-        with DATA.open(newline="", encoding="utf-8") as file:
-            rows = csv.DictReader(file)
-            return [
-                {
-                    "timestamp": (dt := datetime.fromisoformat(row["timestamp"])).isoformat(),
-                    "meter_id": row["meter_id"],
-                    "resource": row["resource"],
-                    "consumption": float(row["consumption"]),
-                    "dt": dt,
-                }
-                for row in rows
-                if resource is None or row["resource"] == resource
-            ]
+        stat = DATA.stat()
+        return load_local(resource, stat.st_mtime_ns, stat.st_size)
 
     conn = snowflake_connection()
     cur = conn.cursor()
@@ -97,13 +103,18 @@ def load(resource=None):
 
     return d
 
-def anomalies(d):
-    vals=[r['consumption'] for r in d]
-    if len(vals)<10:return []
-    if SK: labels=IsolationForest(contamination=.06,random_state=42).fit_predict([[x] for x in vals])
+@lru_cache(maxsize=16)
+def anomaly_indices(values):
+    if len(values)<10:return ()
+    if SK: labels=IsolationForest(contamination=.06,random_state=42).fit_predict([[x] for x in values])
     else:
-        m=statistics.mean(vals); s=statistics.pstdev(vals) or 1; labels=[-1 if abs(x-m)>2.7*s else 1 for x in vals]
-    return [{'timestamp':r['timestamp'],'consumption':r['consumption'],'severity':'high' if r['consumption']>statistics.mean(vals)*2.2 else 'medium'} for r,l in zip(d,labels) if l==-1]
+        m=statistics.mean(values); s=statistics.pstdev(values) or 1; labels=[-1 if abs(x-m)>2.7*s else 1 for x in values]
+    return tuple(index for index,label in enumerate(labels) if label==-1)
+
+def anomalies(d):
+    vals=tuple(r['consumption'] for r in d)
+    mean=statistics.mean(vals) if vals else 0
+    return [{'timestamp':d[i]['timestamp'],'consumption':vals[i],'severity':'high' if vals[i]>mean*2.2 else 'medium'} for i in anomaly_indices(vals)]
 def insight(resource,d,a):
     label='electricity' if resource=='electricity' else 'water'; vals=[r['consumption'] for r in d]; avg=sum(vals)/len(vals); recent=sum(vals[-6:])/6
     if a:
