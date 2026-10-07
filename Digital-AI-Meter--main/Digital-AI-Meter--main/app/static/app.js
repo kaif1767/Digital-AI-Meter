@@ -5,6 +5,7 @@ let forecast=[];
 let insightText='';
 let recommendationText='';
 let requestVersion=0;
+let loadingTimer;
 let activeRange={start:null,end:null,rows:[]};
 let currentPage='';
 
@@ -112,6 +113,12 @@ async function get(path){
 
 async function load(){
     let version=++requestVersion;
+    window.clearTimeout(loadingTimer);
+    $('app-main').setAttribute('aria-busy','true');
+    $('loading-status').textContent=`Loading ${resource} meter data.`;
+    loadingTimer=window.setTimeout(()=>{
+        if(version===requestVersion) document.body.classList.add('is-loading');
+    },120);
     $('load-error').hidden=true;
     try{
         let [summary,data,anomalies,insight,predictions,health]=await Promise.all([
@@ -152,6 +159,13 @@ async function load(){
         $('load-error').textContent=`Could not load meter data. ${error.message}`;
         $('load-error').hidden=false;
         console.error('Dashboard data load failed:',error);
+    }finally{
+        if(version===requestVersion){
+            window.clearTimeout(loadingTimer);
+            document.body.classList.remove('is-loading');
+            $('app-main').setAttribute('aria-busy','false');
+            $('loading-status').textContent='';
+        }
     }
 }
 
